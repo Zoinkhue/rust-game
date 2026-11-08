@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Rust + JS Baseplate</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #87ceeb;
+    touch-action: none; user-select: none; -webkit-user-select: none; font-family: sans-serif; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 8px; left: 8px; color: #fff; font-size: 13px;
+    text-shadow: 0 1px 3px #000; pointer-events: none; }
+  .joy { position: fixed; border-radius: 50%; pointer-events: none; display: none; }
+  #base { width: 140px; height: 140px; background: rgba(255,255,255,.3); }
+  #knob { width: 60px; height: 60px; background: rgba(255,255,255,.8); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="hud">Loading Rust...<br>Left side: move. Right side: jump.</div>
+<div id="base" class="joy"></div>
+<div id="knob" class="joy"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import init, { Player } from './pkg/gamelogic.js';
+
+const hud = document.getElementById('hud');
+try {
+  await init();
+  hud.innerHTML = 'Physics: Rust (WASM)<br>Left side: move. Right side: jump.';
+
+  // Scene
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+  camera.position.set(0, 8, 9);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x446644, 1.0));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+  sun.position.set(10, 20, 5);
+  scene.add(sun);
+
+  // Baseplate (50 x 50, matches HALF_SIZE in Rust)
+  const plate = new THREE.Mesh(
+    new THREE.BoxGeometry(50, 1, 50),
+    new THREE.MeshStandardMaterial({ color: 0x59a659 }));
+  plate.position.y = -0.5;
+  scene.add(plate);
+
+  // Markers
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2;
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(i / 12, 0.6, 0.55) }));
+    m.position.set(Math.cos(a) * 10, 0.5, Math.sin(a) * 10);
+    scene.add(m);
+  }
+
+  // Player
+  const mesh = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.5, 1, 4, 12),
+    new THREE.MeshStandardMaterial({ color: 0xe64d33 }));
+  scene.add(mesh);
+  const player = new Player();
+
+  // Input
+  const R = 70;
+  let joyId = null, origin = { x: 0, y: 0 }, joy = { x: 0, y: 0 }, jumpQueued = false;
+  const base = document.getElementById('base');
+  const knob = document.getElementById('knob');
+  const place = (el, x, y) => { el.style.left = (x - el.offsetWidth / 2) + 'px'; el.style.top = (y - el.offsetHeight / 2) + 'px'; };
+
+  addEventListener('pointerdown', e => {
+    if (e.clientX < innerWidth / 2 && joyId === null) {
+      joyId = e.pointerId;
+      origin = { x: e.clientX, y: e.clientY };
+      base.style.display = knob.style.display = 'block';
+      place(base, origin.x, origin.y);
+      place(knob, origin.x, origin.y);
+    } else if (e.clientX >= innerWidth / 2) {
+      jumpQueued = true;
+    }
+  });
+  addEventListener('pointermove', e => {
+    if (e.pointerId !== joyId) return;
+    let dx = (e.clientX - origin.x) / R, dy = (e.clientY - origin.y) / R;
+    const len = Math.hypot(dx, dy);
+    if (len > 1) { dx /= len; dy /= len; }
+    joy = { x: dx, y: dy };
+    place(knob, origin.x + dx * R, origin.y + dy * R);
+  });
+  const release = e => {
+    if (e.pointerId !== joyId) return;
+    joyId = null;
+    joy = { x: 0, y: 0 };
+    base.style.display = knob.style.display = 'none';
+  };
+  addEventListener('pointerup', release);
+  addEventListener('pointercancel', release);
+
+  const keys = {};
+  addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') jumpQueued = true; });
+  addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // Loop: one call into Rust per frame
+  const clock = new THREE.Clock();
+  const camTarget = new THREE.Vector3();
+  function frame() {
+    const dt = clock.getDelta();
+    const mx = joy.x + ((keys.KeyD || keys.ArrowRight) ? 1 : 0) - ((keys.KeyA || keys.ArrowLeft) ? 1 : 0);
+    const mz = joy.y + ((keys.KeyS || keys.ArrowDown) ? 1 : 0) - ((keys.KeyW || keys.ArrowUp) ? 1 : 0);
+    player.step(mx, mz, jumpQueued, dt);
+    jumpQueued = false;
+
+    mesh.position.set(player.x, player.y, player.z);
+    camTarget.set(player.x, 8, player.z + 9);
+    camera.position.lerp(camTarget, 1 - Math.exp(-8 * dt));
+    camera.lookAt(player.x, 1, player.z);
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  frame();
+} catch (err) {
+  hud.textContent = 'Error: ' + err;
+}
+</script>
+</body>
+  </html>
